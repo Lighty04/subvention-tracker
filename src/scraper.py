@@ -7,13 +7,15 @@ from datetime import datetime
 PARIS_API_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/subventions-associations-votees-/records"
 BATCH_SIZE = 100
 
-async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE) -> List[dict]:
+async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE, year: int = None) -> List[dict]:
     async with httpx.AsyncClient() as client:
         params = {
             "limit": limit,
             "offset": offset,
             "order_by": "annee_budgetaire DESC"
         }
+        if year:
+            params["where"] = f"annee_budgetaire={year}"
         resp = await client.get(PARIS_API_URL, params=params, timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
@@ -27,45 +29,56 @@ async def import_recent_subventions(db: Session, max_records: int = 500) -> Impo
     
     imported = 0
     updated = 0
-    offset = 0
     
     try:
-        while imported < max_records:
-            batch = await fetch_subventions(offset=offset, limit=BATCH_SIZE)
-            if not batch:
+        # Import by year to avoid 10k offset limit
+        # Start from most recent year
+        current_year = datetime.utcnow().year
+        for year in range(current_year, 2010, -1):
+            if imported >= max_records:
                 break
             
-            for record in batch:
-                dossier = record.get("numero_de_dossier")
-                if not dossier:
-                    continue
-                existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
+            year_imported = 0
+            offset = 0
+            while imported < max_records:
+                batch = await fetch_subventions(offset=offset, limit=BATCH_SIZE, year=year)
+                if not batch:
+                    break
                 
-                subvention_data = {
-                    "numero_dossier": dossier,
-                    "annee_budgetaire": int(record.get("annee_budgetaire", 0)) if record.get("annee_budgetaire") else None,
-                    "collectivite": record.get("collectivite"),
-                    "nom_beneficiaire": record.get("nom_beneficiaire"),
-                    "numero_siret": record.get("numero_siret"),
-                    "objet_dossier": record.get("objet_du_dossier"),
-                    "montant_vote": record.get("montant_vote"),
-                    "direction": record.get("direction"),
-                    "nature_subvention": record.get("nature_de_la_subvention"),
-                    "secteurs_activites": record.get("secteurs_d_activites_definies_par_l_association", [])
-                }
+                for record in batch:
+                    dossier = record.get("numero_de_dossier")
+                    if not dossier:
+                        continue
+                    existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
+                    
+                    subvention_data = {
+                        "numero_dossier": dossier,
+                        "annee_budgetaire": int(record.get("annee_budgetaire", 0)) if record.get("annee_budgetaire") else None,
+                        "collectivite": record.get("collectivite"),
+                        "nom_beneficiaire": record.get("nom_beneficiaire"),
+                        "numero_siret": record.get("numero_siret"),
+                        "objet_dossier": record.get("objet_du_dossier"),
+                        "montant_vote": record.get("montant_vote"),
+                        "direction": record.get("direction"),
+                        "nature_subvention": record.get("nature_de_la_subvention"),
+                        "secteurs_activites": record.get("secteurs_d_activites_definies_par_l_association", [])
+                    }
+                    
+                    if existing:
+                        for key, value in subvention_data.items():
+                            setattr(existing, key, value)
+                        updated += 1
+                    else:
+                        db.add(Subvention(**subvention_data))
+                        imported += 1
+                        year_imported += 1
                 
-                if existing:
-                    for key, value in subvention_data.items():
-                        setattr(existing, key, value)
-                    updated += 1
-                else:
-                    db.add(Subvention(**subvention_data))
-                    imported += 1
+                db.commit()
+                offset += len(batch)
+                if len(batch) < BATCH_SIZE:
+                    break
             
-            db.commit()
-            offset += len(batch)
-            if len(batch) < BATCH_SIZE:
-                break
+            print(f"  Year {year}: {year_imported} records")
         
         score_conflicts(db)
         generate_alerts(db)
