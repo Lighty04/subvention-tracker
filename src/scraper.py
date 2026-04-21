@@ -111,6 +111,10 @@ def score_conflicts(db: Session) -> None:
     # Normalize watched names for substring matching
     watched_norms = [(w, normalize_text(w.nom)) for w in watched]
     
+    # Reset all scores first
+    db.execute(Subvention.__table__.update().values(risk_level=RiskLevel.LOW, risk_reasons=[]))
+    db.commit()
+    
     subventions = db.query(Subvention).all()
     
     for sub in subventions:
