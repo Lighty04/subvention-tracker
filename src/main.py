@@ -612,6 +612,260 @@ def daily_cron(db: Session = Depends(get_db)):
     }
 
 # ====================================================================
+# MONETIZATION: LEADERBOARD
+# ====================================================================
+
+@app.get("/api/leaderboard")
+def get_leaderboard(
+    year: Optional[int] = None,
+    sector: Optional[str] = None,
+    limit: int = Query(20, le=100),
+    db: Session = Depends(get_db)
+):
+    """Top recipients by total amount received."""
+    query = db.query(
+        Subvention.nom_beneficiaire,
+        func.sum(Subvention.montant_vote).label("total"),
+        func.count(Subvention.id).label("count"),
+        func.avg(Subvention.montant_vote).label("average")
+    )
+    
+    if year:
+        query = query.filter(Subvention.annee_budgetaire == year)
+    if sector:
+        query = query.filter(Subvention.nature_subvention.ilike(f"%{sector}%"))
+    
+    results = query.group_by(Subvention.nom_beneficiaire).order_by(func.sum(Subvention.montant_vote).desc()).limit(limit).all()
+    
+    # Calculate year-over-year growth for top 10
+    leaderboard = []
+    for r in results:
+        total = r.total or 0
+        # Get previous year total
+        prev_year = (year - 1) if year else None
+        prev_total = 0
+        if prev_year:
+            prev = db.query(func.sum(Subvention.montant_vote)).filter(
+                Subvention.nom_beneficiaire == r.nom_beneficiaire,
+                Subvention.annee_budgetaire == prev_year
+            ).scalar() or 0
+            prev_total = prev
+        
+        growth = None
+        if prev_total > 0:
+            growth = round(((total - prev_total) / prev_total) * 100, 1)
+        
+        leaderboard.append({
+            "rank": len(leaderboard) + 1,
+            "nom": r.nom_beneficiaire,
+            "total": int(total),
+            "count": r.count,
+            "average": int(r.average or 0),
+            "growth_pct": growth,
+            "risk_level": db.query(Subvention).filter(
+                Subvention.nom_beneficiaire == r.nom_beneficiaire
+            ).order_by(Subvention.annee_budgetaire.desc()).first().risk_level.value
+        })
+    
+    return {
+        "year": year,
+        "sector": sector,
+        "total": len(leaderboard),
+        "items": leaderboard
+    }
+
+# ====================================================================
+# MONETIZATION: PERSON ALERT PAGE
+# ====================================================================
+
+@app.get("/alert/person/{person_id}")
+def person_alert_page(person_id: int, request: FastAPIRequest, db: Session = Depends(get_db)):
+    """Auto-generated profile alert page for flagged persons."""
+    from .models import Person
+    person = db.query(Person).get(person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    
+    risk_data = calculate_person_risk_score(db, person_id)
+    
+    # Get all subventions for associations where this person is on the board
+    subventions = []
+    total_controlled = 0
+    for role_info in (person.roles or []):
+        assoc_name = role_info.get("association", "")
+        assoc_subs = db.query(Subvention).filter(Subvention.nom_beneficiaire == assoc_name).order_by(Subvention.annee_budgetaire.desc()).all()
+        for s in assoc_subs:
+            subventions.append(s)
+            total_controlled += s.montant_vote or 0
+    
+    # Sort by amount
+    subventions.sort(key=lambda x: x.montant_vote or 0, reverse=True)
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🚨 Alert: {person.nom} — SubventionTracker</title>
+        <style>
+            body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
+            .header {{ background: #c62828; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .header h1 {{ margin: 0; }}
+            .stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }}
+            .stat {{ background: white; padding: 15px; border-radius: 8px; text-align: center; }}
+            .stat h3 {{ margin: 0; font-size: 28px; color: #333; }}
+            .section {{ background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #eee; }}
+            th {{ background: #f9f9f9; }}
+            .risk-critical {{ color: #c62828; font-weight: bold; }}
+            .risk-high {{ color: #ef6c00; }}
+            .role-badge {{ background: #e3f2fd; color: #1976d2; padding: 4px 8px; border-radius: 4px; font-size: 12px; display: inline-block; margin: 2px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🚨 Person Alert: {person.nom}</h1>
+            <p>{"⚠️ ELECTED OFFICIAL" if person.is_elected_official else "Board Member"}</p>
+        </div>
+        
+        <div class="stats">
+            <div class="stat">
+                <h3>€{"{:,}".format(total_controlled).replace(",", " ")}</h3>
+                <p>Total Controlled</p>
+            </div>
+            <div class="stat">
+                <h3>{risk_data.get('risk_score', 0)}/100</h3>
+                <p>Risk Score</p>
+            </div>
+            <div class="stat">
+                <h3>{len(person.roles) if person.roles else 0}</h3>
+                <p>Associations</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>🎭 Roles</h2>
+            {"".join(f"\u003cspan class='role-badge'\u003e{r.get('association', '')} - {r.get('role', 'Member')}\u003c/span\u003e" for r in (person.roles or []))}
+        </div>
+        
+        <div class="section">
+            <h2>💰 Subventions Controlled</h2>
+            <table>
+                <tr>
+                    <th>Association</th>
+                    <th>Amount</th>
+                    <th>Year</th>
+                    <th>Risk</th>
+                </tr>
+                {''.join(f"\u003ctr\u003e\u003ctd\u003e{s.nom_beneficiaire}\u003c/td\u003e\u003ctd\u003e€{'{:,}'.format(s.montant_vote).replace(',', ' ')}\u003c/td\u003e\u003ctd\u003e{s.annee_budgetaire}\u003c/td\u003e\u003ctd class='risk-{s.risk_level.value}'\u003e{s.risk_level.value.upper()}\u003c/td\u003e\u003c/tr\u003e" for s in subventions[:20])}
+            </table>
+        </div>
+        
+        <p style="text-align:center"><a href="/daily">← Back to Dashboard</a></p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+# ====================================================================
+# MONETIZATION: ASSOCIATION PROFILE PAGE
+# ====================================================================
+
+@app.get("/alert/association/{siret}")
+def association_alert_page(siret: str, request: FastAPIRequest, db: Session = Depends(get_db)):
+    """Auto-generated profile alert page for flagged associations."""
+    subs = db.query(Subvention).filter(Subvention.numero_siret == siret).order_by(Subvention.annee_budgetaire.desc()).all()
+    if not subs:
+        raise HTTPException(status_code=404, detail="Association not found")
+    
+    total = sum(s.montant_vote or 0 for s in subs)
+    latest = subs[0]
+    
+    # Year-over-year data
+    yearly = {}
+    for s in subs:
+        y = s.annee_budgetaire or 0
+        if y not in yearly:
+            yearly[y] = {"total": 0, "count": 0}
+        yearly[y]["total"] += s.montant_vote or 0
+        yearly[y]["count"] += 1
+    
+    years_sorted = sorted(yearly.keys(), reverse=True)
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🏢 {latest.nom_beneficiaire} — SubventionTracker</title>
+        <style>
+            body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
+            .header {{ background: {'#c62828' if latest.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL] else '#1976d2'}; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .header h1 {{ margin: 0; }}
+            .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }}
+            .stat {{ background: white; padding: 15px; border-radius: 8px; text-align: center; }}
+            .stat h3 {{ margin: 0; font-size: 24px; }}
+            .section {{ background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #eee; }}
+            th {{ background: #f9f9f9; }}
+            .risk-critical {{ color: #c62828; font-weight: bold; }}
+            .risk-high {{ color: #ef6c00; }}
+            .trend-up {{ color: #2e7d32; }}
+            .trend-down {{ color: #c62828; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🏢 {latest.nom_beneficiaire}</h1>
+            <p>SIRET: {siret} | Risk: {latest.risk_level.value.upper()}</p>
+        </div>
+        
+        <div class="stats">
+            <div class="stat">
+                <h3>€{"{:,}".format(total).replace(",", " ")}</h3>
+                <p>Total Received</p>
+            </div>
+            <div class="stat">
+                <h3>{len(subs)}</h3>
+                <p>Subventions</p>
+            </div>
+            <div class="stat">
+                <h3>€{"{:,}".format(int(total/len(subs))).replace(",", " ")}</h3>
+                <p>Average</p>
+            </div>
+            <div class="stat">
+                <h3>{years_sorted[0] if years_sorted else 'N/A'}</h3>
+                <p>Latest Year</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>📊 Year-over-Year</h2>
+            <table>
+                <tr><th>Year</th><th>Total</th><th>Count</th></tr>
+                {''.join(f"\u003ctr\u003e\u003ctd\u003e{y}\u003c/td\u003e\u003ctd\u003e€{'{:,}'.format(yearly[y]['total']).replace(',', ' ')}\u003c/td\u003e\u003ctd\u003e{yearly[y]['count']}\u003c/td\u003e\u003c/tr\u003e" for y in years_sorted[:10])}
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2>📋 Latest Subventions</h2>
+            <table>
+                <tr><th>Year</th><th>Amount</th><th>Direction</th><th>Object</th></tr>
+                {''.join(f"\u003ctr\u003e\u003ctd\u003e{s.annee_budgetaire}\u003c/td\u003e\u003ctd\u003e€{'{:,}'.format(s.montant_vote).replace(',', ' ')}\u003c/td\u003e\u003ctd\u003e{s.direction}\u003c/td\u003e\u003ctd\u003e{s.objet_dossier[:60] if s.objet_dossier else ''}\u003c/td\u003e\u003c/tr\u003e" for s in subs[:15])}
+            </table>
+        </div>
+        
+        <p style="text-align:center"><a href="/daily">← Back to Dashboard</a></p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+# ====================================================================
 # DASHBOARD
 # ====================================================================
 
