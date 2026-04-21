@@ -3,9 +3,13 @@ from sqlalchemy.orm import Session
 from .models import Subvention, ImportLog, RiskLevel, WatchedAssociation, Alert, AlertConfig, User
 from typing import List
 from datetime import datetime
+import csv
+import io
 
 PARIS_API_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/subventions-associations-votees-/records"
+PARIS_CSV_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/subventions-associations-votees-/exports/csv"
 BATCH_SIZE = 100
+MAX_API_OFFSET = 9900  # API limit
 
 async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE, year: int = None) -> List[dict]:
     async with httpx.AsyncClient() as client:
@@ -21,75 +25,137 @@ async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE, year: int 
         data = resp.json()
         return data.get("results", [])
 
-async def import_recent_subventions(db: Session, max_records: int = 500) -> ImportLog:
+async def download_full_csv() -> List[dict]:
+    """Download full dataset as CSV (bypasses 10k API limit)."""
+    async with httpx.AsyncClient() as client:
+        params = {"limit": -1, "facet": "false"}  # -1 = all records
+        resp = await client.get(PARIS_CSV_URL, params=params, timeout=120.0)
+        resp.raise_for_status()
+        
+        # Parse CSV
+        content = resp.text
+        reader = csv.DictReader(io.StringIO(content))
+        records = []
+        for row in reader:
+            records.append({
+                "numero_de_dossier": row.get("numero_de_dossier"),
+                "annee_budgetaire": row.get("annee_budgetaire"),
+                "collectivite": row.get("collectivite"),
+                "nom_beneficiaire": row.get("nom_beneficiaire"),
+                "numero_siret": row.get("numero_siret"),
+                "objet_du_dossier": row.get("objet_du_dossier"),
+                "montant_vote": row.get("montant_vote"),
+                "direction": row.get("direction"),
+                "nature_de_la_subvention": row.get("nature_de_la_subvention"),
+                "secteurs_d_activites_definies_par_l_association": row.get("secteurs_d_activites_definies_par_l_association", "")
+            })
+        return records
+
+def _import_record(db: Session, record: dict, imported: list, updated: list):
+    """Import a single record. Returns True if imported/updated."""
+    dossier = record.get("numero_de_dossier")
+    if not dossier:
+        return False
+    
+    existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
+    
+    # Parse amount - handle both string and numeric
+    amount = record.get("montant_vote")
+    if isinstance(amount, str):
+        amount = amount.replace(" ", "").replace(",", ".")
+        try:
+            amount = float(amount)
+        except:
+            amount = None
+    
+    subvention_data = {
+        "numero_dossier": dossier,
+        "annee_budgetaire": int(record.get("annee_budgetaire", 0)) if record.get("annee_budgetaire") else None,
+        "collectivite": record.get("collectivite"),
+        "nom_beneficiaire": record.get("nom_beneficiaire"),
+        "numero_siret": record.get("numero_siret"),
+        "objet_dossier": record.get("objet_du_dossier"),
+        "montant_vote": int(amount) if amount else None,
+        "direction": record.get("direction"),
+        "nature_subvention": record.get("nature_de_la_subvention"),
+        "secteurs_activites": record.get("secteurs_d_activites_definies_par_l_association", [])
+    }
+    
+    if existing:
+        for key, value in subvention_data.items():
+            setattr(existing, key, value)
+        updated.append(1)
+    else:
+        db.add(Subvention(**subvention_data))
+        imported.append(1)
+    
+    return True
+
+async def import_recent_subventions(db: Session, max_records: int = 500, use_csv: bool = False) -> ImportLog:
     log = ImportLog(status="running")
     db.add(log)
     db.commit()
     db.refresh(log)
     
-    imported = 0
-    updated = 0
+    imported = []
+    updated = []
     
     try:
-        # Import by year to avoid 10k offset limit
-        # Start from most recent year
-        current_year = datetime.utcnow().year
-        for year in range(current_year, 2010, -1):
-            if imported >= max_records:
-                break
+        if use_csv:
+            print("Downloading full dataset as CSV (this may take a minute)...")
+            records = await download_full_csv()
+            print(f"  Downloaded {len(records)} records from CSV")
             
-            year_imported = 0
-            offset = 0
-            while imported < max_records:
-                batch = await fetch_subventions(offset=offset, limit=BATCH_SIZE, year=year)
-                if not batch:
+            for i, record in enumerate(records):
+                if max_records > 0 and len(imported) >= max_records:
+                    break
+                _import_record(db, record, imported, updated)
+                if i % 1000 == 0:
+                    db.commit()
+                    print(f"  Progress: {len(imported)} imported, {len(updated)} updated")
+            
+            db.commit()
+            print(f"  CSV import: {len(imported)} imported, {len(updated)} updated")
+            
+        else:
+            # API-based import (year-by-year, up to 10k per year)
+            current_year = datetime.utcnow().year
+            for year in range(current_year, 2010, -1):
+                if max_records > 0 and len(imported) >= max_records:
                     break
                 
-                for record in batch:
-                    dossier = record.get("numero_de_dossier")
-                    if not dossier:
-                        continue
-                    existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
+                year_imported = 0
+                offset = 0
+                while (max_records <= 0 or len(imported) < max_records) and offset < MAX_API_OFFSET:
+                    batch = await fetch_subventions(offset=offset, limit=BATCH_SIZE, year=year)
+                    if not batch:
+                        break
                     
-                    subvention_data = {
-                        "numero_dossier": dossier,
-                        "annee_budgetaire": int(record.get("annee_budgetaire", 0)) if record.get("annee_budgetaire") else None,
-                        "collectivite": record.get("collectivite"),
-                        "nom_beneficiaire": record.get("nom_beneficiaire"),
-                        "numero_siret": record.get("numero_siret"),
-                        "objet_dossier": record.get("objet_du_dossier"),
-                        "montant_vote": record.get("montant_vote"),
-                        "direction": record.get("direction"),
-                        "nature_subvention": record.get("nature_de_la_subvention"),
-                        "secteurs_activites": record.get("secteurs_d_activites_definies_par_l_association", [])
-                    }
+                    for record in batch:
+                        if _import_record(db, record, imported, updated):
+                            year_imported += 1
+                        if max_records > 0 and len(imported) >= max_records:
+                            break
                     
-                    if existing:
-                        for key, value in subvention_data.items():
-                            setattr(existing, key, value)
-                        updated += 1
-                    else:
-                        db.add(Subvention(**subvention_data))
-                        imported += 1
-                        year_imported += 1
+                    db.commit()
+                    offset += len(batch)
+                    if len(batch) < BATCH_SIZE:
+                        break
                 
-                db.commit()
-                offset += len(batch)
-                if len(batch) < BATCH_SIZE:
-                    break
-            
-            print(f"  Year {year}: {year_imported} records")
+                if year_imported > 0:
+                    print(f"  Year {year}: {year_imported} records")
         
         score_conflicts(db)
         generate_alerts(db)
         
-        log.records_imported = imported
-        log.records_updated = updated
+        log.records_imported = len(imported)
+        log.records_updated = len(updated)
         log.status = "success"
         
     except Exception as e:
         log.status = "failed"
         log.error_message = str(e)
+        print(f"Import failed: {e}")
     
     log.finished_at = datetime.utcnow()
     db.commit()

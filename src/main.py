@@ -107,18 +107,23 @@ def search_subventions(q: str = Query(..., min_length=2), limit: int = Query(50,
 # IMPORT
 # ====================================================================
 
-async def _run_import(max_records: int):
+async def _run_import(max_records: int, use_csv: bool = False):
     from .models import SessionLocal
     db = SessionLocal()
     try:
-        await import_recent_subventions(db, max_records)
+        await import_recent_subventions(db, max_records, use_csv=use_csv)
     finally:
         db.close()
 
 @app.post("/api/import")
-def trigger_import(background_tasks: BackgroundTasks, max_records: int = Query(100, le=5000), user: User = Depends(require_user)):
-    background_tasks.add_task(_run_import, max_records)
-    return {"status": "started", "max_records": max_records}
+def trigger_import(
+    background_tasks: BackgroundTasks,
+    max_records: int = Query(100, le=500000),
+    csv: bool = Query(False),
+    user: User = Depends(require_user)
+):
+    background_tasks.add_task(_run_import, max_records, use_csv=csv)
+    return {"status": "started", "max_records": max_records, "mode": "csv" if csv else "api"}
 
 @app.get("/api/import/status", response_model=ImportStatus)
 def import_status(db: Session = Depends(get_db)):

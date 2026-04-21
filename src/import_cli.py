@@ -13,7 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description="Import subventions from Paris Open Data")
     parser.add_argument("--max-records", type=int, default=500, help="Max records to import")
     parser.add_argument("--seed", action="store_true", help="Seed watched associations first")
-    parser.add_argument("--full", action="store_true", help="Import full dataset (all years, high offset)")
+    parser.add_argument("--csv", action="store_true", help="Use CSV download for full dataset (bypasses API limit)")
     args = parser.parse_args()
     
     init_db()
@@ -24,9 +24,9 @@ def main():
             count = seed_watched_associations(db)
             print(f"Seeded {count} watched associations")
         
-        if args.full:
-            print("Starting FULL import (all years, up to 106k records)...")
-            log = asyncio.run(import_recent_subventions(db, 200000))
+        if args.csv:
+            print("Starting FULL import via CSV download...")
+            log = asyncio.run(import_recent_subventions(db, 500000, use_csv=True))
         else:
             print(f"Starting import (max {args.max_records} records)...")
             log = asyncio.run(import_recent_subventions(db, args.max_records))
