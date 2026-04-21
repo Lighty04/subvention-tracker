@@ -1,9 +1,8 @@
 import httpx
 from sqlalchemy.orm import Session
-from .models import Subvention, ImportLog, RiskLevel, WatchedAssociation
-from typing import Optional, List
+from .models import Subvention, ImportLog, RiskLevel, WatchedAssociation, Alert, AlertConfig, User
+from typing import List
 from datetime import datetime
-import asyncio
 
 PARIS_API_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/subventions-associations-votees-/records"
 BATCH_SIZE = 100
@@ -38,6 +37,8 @@ async def import_recent_subventions(db: Session, max_records: int = 500) -> Impo
             
             for record in batch:
                 dossier = record.get("numero_de_dossier")
+                if not dossier:
+                    continue
                 existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
                 
                 subvention_data = {
@@ -66,8 +67,8 @@ async def import_recent_subventions(db: Session, max_records: int = 500) -> Impo
             if len(batch) < BATCH_SIZE:
                 break
         
-        # Run conflict scoring
         score_conflicts(db)
+        generate_alerts(db)
         
         log.records_imported = imported
         log.records_updated = updated
@@ -83,9 +84,7 @@ async def import_recent_subventions(db: Session, max_records: int = 500) -> Impo
     return log
 
 def score_conflicts(db: Session) -> None:
-    """Flag subventions where beneficiary matches watched associations."""
     watched = db.query(WatchedAssociation).filter_by(active=True).all()
-    watched_names = {w.nom.lower() for w in watched}
     watched_sirets = {w.numero_siret for w in watched if w.numero_siret}
     
     subventions = db.query(Subvention).filter(Subvention.risk_level == RiskLevel.LOW).all()
@@ -94,12 +93,10 @@ def score_conflicts(db: Session) -> None:
         reasons = []
         max_risk = RiskLevel.LOW
         
-        # Match by SIRET (exact)
         if sub.numero_siret and sub.numero_siret in watched_sirets:
             reasons.append(f"SIRET {sub.numero_siret} matches watched association")
             max_risk = RiskLevel.CRITICAL
         
-        # Match by name (fuzzy/contains)
         if sub.nom_beneficiaire:
             name_lower = sub.nom_beneficiaire.lower()
             for w in watched:
@@ -109,6 +106,8 @@ def score_conflicts(db: Session) -> None:
                         max_risk = RiskLevel.CRITICAL
                     elif w.risk_level == RiskLevel.HIGH and max_risk != RiskLevel.CRITICAL:
                         max_risk = RiskLevel.HIGH
+                    elif w.risk_level == RiskLevel.MEDIUM and max_risk not in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+                        max_risk = RiskLevel.MEDIUM
         
         if reasons:
             sub.risk_level = max_risk
@@ -116,4 +115,38 @@ def score_conflicts(db: Session) -> None:
     
     db.commit()
 
-from datetime import datetime
+def generate_alerts(db: Session) -> int:
+    configs = db.query(AlertConfig).filter_by(enabled=True).all()
+    if not configs:
+        return 0
+    
+    high_risk = db.query(Subvention).filter(
+        Subvention.risk_level.in_([RiskLevel.HIGH, RiskLevel.CRITICAL]),
+        Subvention.date_import >= datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    ).all()
+    
+    created = 0
+    for sub in high_risk:
+        for cfg in configs:
+            existing = db.query(Alert).filter_by(
+                user_id=cfg.user_id,
+                subvention_id=sub.id
+            ).first()
+            if existing:
+                continue
+            
+            min_risk = cfg.min_risk_level or RiskLevel.HIGH
+            if sub.risk_level.value not in ["high", "critical"] and sub.risk_level != min_risk:
+                continue
+            
+            alert = Alert(
+                user_id=cfg.user_id,
+                subvention_id=sub.id,
+                channel="email" if cfg.email else "webhook",
+                status="pending"
+            )
+            db.add(alert)
+            created += 1
+    
+    db.commit()
+    return created

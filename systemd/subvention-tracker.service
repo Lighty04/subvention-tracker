@@ -1,0 +1,16 @@
+[Unit]
+Description=Subvention Tracker FastAPI App
+After=network.target
+
+[Service]
+Type=simple
+User=decisionhelper
+WorkingDirectory=/home/decisionhelper/subvention-tracker
+Environment=DATABASE_URL=sqlite:///./data/subvention_tracker.db
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/decisionhelper/subvention-tracker/.venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

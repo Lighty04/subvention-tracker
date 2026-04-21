@@ -10,6 +10,7 @@
         .stats { display: flex; gap: 20px; margin-bottom: 20px; }
         .stat-box { background: #f0f0f0; padding: 15px; border-radius: 8px; flex: 1; }
         .stat-box.high-risk { background: #ffebee; border-left: 4px solid #e53935; }
+        .stat-box.critical { background: #ffebee; border-left: 4px solid #c62828; color: #c62828; }
         table { width: 100%; border-collapse: collapse; }
         th, td { text-align: left; padding: 10px; border-bottom: 1px solid #ddd; }
         .risk-critical { background: #ffebee; color: #c62828; font-weight: bold; }
@@ -18,6 +19,13 @@
         .risk-low { color: #666; }
         .btn { background: #1976d2; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; }
         .btn:hover { background: #1565c0; }
+        .search-bar { margin-bottom: 20px; }
+        .search-bar input { padding: 10px; width: 400px; border: 1px solid #ddd; border-radius: 4px; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        .tab { padding: 8px 16px; cursor: pointer; border-radius: 4px; background: #eee; }
+        .tab.active { background: #1976d2; color: white; }
+        .pagination { display: flex; gap: 10px; margin-top: 20px; }
+        .page-btn { padding: 6px 12px; border: 1px solid #ddd; background: white; cursor: pointer; border-radius: 4px; }
     </style>
 </head>
 <body>
@@ -30,6 +38,9 @@
         <div class="stat-box high-risk">
             <strong>{{ high_risk }}</strong> high/critical risk
         </div>
+        <div class="stat-box critical">
+            <strong>{{ critical }}</strong> critical
+        </div>
         <div class="stat-box">
             <button class="btn" hx-post="/api/import?max_records=50" hx-target="#import-status">
                 🔄 Import Now
@@ -38,30 +49,45 @@
         </div>
     </div>
 
-    <h2>Recent Subventions</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>Year</th>
-                <th>Beneficiary</th>
-                <th>Amount (€)</th>
-                <th>Direction</th>
-                <th>Risk</th>
-                <th>Object</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for s in recent %}
-            <tr class="risk-{{ s.risk_level.value }}">
-                <td>{{ s.annee_budgetaire }}</td>
-                <td>{{ s.nom_beneficiaire }}</td>
-                <td>{{ "{:,}".format(s.montant_vote).replace(",", " ") }}</td>
-                <td>{{ s.direction }}</td>
-                <td>{{ s.risk_level.value.upper() }}</td>
-                <td>{{ s.objet_dossier[:80] }}...</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="search-bar">
+        <input type="text" placeholder="Search beneficiaries, objects, SIRET..." 
+               hx-get="/api/search" hx-trigger="keyup changed delay:300ms" 
+               name="q" hx-target="#results" hx-indicator="#loading">
+        <span id="loading" style="display:none">⏳</span>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" hx-get="/api/subventions?limit=20" hx-target="#results">All</div>
+        <div class="tab" hx-get="/api/subventions?risk=high&limit=20" hx-target="#results">High Risk</div>
+        <div class="tab" hx-get="/api/subventions?risk=critical&limit=20" hx-target="#results">Critical</div>
+    </div>
+
+    <div id="results">
+        <h2>Recent Subventions</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Year</th>
+                    <th>Beneficiary</th>
+                    <th>Amount (€)</th>
+                    <th>Direction</th>
+                    <th>Risk</th>
+                    <th>Object</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in recent %}
+                <tr class="risk-{{ s.risk_level.value }}">
+                    <td>{{ s.annee_budgetaire }}</td>
+                    <td>{{ s.nom_beneficiaire }}</td>
+                    <td>{{ "{:,}".format(s.montant_vote).replace(",", " ") }}</td>
+                    <td>{{ s.direction }}</td>
+                    <td>{{ s.risk_level.value.upper() }}</td>
+                    <td>{{ s.objet_dossier[:80] }}...</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </body>
 </html>
