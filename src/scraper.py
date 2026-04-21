@@ -96,6 +96,14 @@ async def import_recent_subventions(db: Session, max_records: int = 500) -> Impo
     db.refresh(log)
     return log
 
+import unicodedata
+
+def normalize_text(text: str) -> str:
+    """Strip accents and lowercase for fuzzy matching."""
+    text = text.lower()
+    text = ''.join(c for c in unicodedata.normalize('NFKD', text) if unicodedata.category(c) != 'Mn')
+    return text
+
 def score_conflicts(db: Session) -> None:
     watched = db.query(WatchedAssociation).filter_by(active=True).all()
     watched_sirets = {w.numero_siret for w in watched if w.numero_siret}
@@ -111,9 +119,10 @@ def score_conflicts(db: Session) -> None:
             max_risk = RiskLevel.CRITICAL
         
         if sub.nom_beneficiaire:
-            name_lower = sub.nom_beneficiaire.lower()
+            name_lower = normalize_text(sub.nom_beneficiaire)
             for w in watched:
-                if w.nom.lower() in name_lower or name_lower in w.nom.lower():
+                w_norm = normalize_text(w.nom)
+                if w_norm in name_lower or name_lower in w_norm:
                     reasons.append(f"Name matches watched association: {w.nom}")
                     if w.risk_level == RiskLevel.CRITICAL:
                         max_risk = RiskLevel.CRITICAL
