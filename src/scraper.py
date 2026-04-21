@@ -108,8 +108,14 @@ def score_conflicts(db: Session) -> None:
     watched = db.query(WatchedAssociation).filter_by(active=True).all()
     watched_sirets = {w.numero_siret for w in watched if w.numero_siret}
     
-    # Normalize watched names for substring matching
-    watched_norms = [(w, normalize_text(w.nom)) for w in watched]
+    # Normalize watched names + extract key identifying tokens
+    stopwords = {"association", "fondation", "pour", "les", "des", "de", "la", "le", "du", "et", "en", "paris", "france", "ville", "communaute", "communauté"}
+    
+    watched_entries = []
+    for w in watched:
+        norm = normalize_text(w.nom)
+        tokens = [t for t in norm.split() if len(t) >= 3 and t not in stopwords]
+        watched_entries.append((w, norm, tokens))
     
     # Reset all scores first
     db.execute(Subvention.__table__.update().values(risk_level=RiskLevel.LOW, risk_reasons=[]))
@@ -127,10 +133,24 @@ def score_conflicts(db: Session) -> None:
         
         if sub.nom_beneficiaire:
             sub_norm = normalize_text(sub.nom_beneficiaire)
+            sub_tokens = [t for t in sub_norm.split() if len(t) >= 3 and t not in stopwords]
             
-            for w, w_norm in watched_norms:
-                # Check if the full watched name (normalized) appears as a substring
+            for w, w_norm, w_tokens in watched_entries:
+                # 1. Exact substring match
+                matched = False
                 if w_norm in sub_norm or sub_norm in w_norm:
+                    matched = True
+                # 2. Key token overlap (first 1-2 identifying words match)
+                elif w_tokens and sub_tokens:
+                    # Match if first token matches
+                    if w_tokens[0] in sub_tokens:
+                        matched = True
+                    # Or if 2+ tokens overlap (for multi-word orgs)
+                    overlap = set(w_tokens) & set(sub_tokens)
+                    if len(overlap) >= 2:
+                        matched = True
+                
+                if matched:
                     reasons.append(f"Name matches watched association: {w.nom}")
                     if w.risk_level == RiskLevel.CRITICAL:
                         max_risk = RiskLevel.CRITICAL
