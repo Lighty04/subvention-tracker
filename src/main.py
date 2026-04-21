@@ -15,7 +15,7 @@ from .schemas import (
     SubventionResponse, SubventionList, WatchedAssocCreate, WatchedAssocResponse,
     UserRegister, UserLogin, UserResponse, AlertConfigCreate, AlertResponse, ImportStatus
 )
-from .scraper import import_recent_subventions
+from .scraper import import_recent_subventions, score_conflicts
 from .seeds import seed_watched_associations
 from .reports import (
     export_subventions_csv, export_subventions_pdf, get_daily_summary,
@@ -582,6 +582,34 @@ def send_digest_email(
 @app.get("/api/newsletter/preview")
 def newsletter_preview(db: Session = Depends(get_db)):
     return get_newsletter_preview(db)
+
+# ====================================================================
+# CRON / SCHEDULED TASKS
+# ====================================================================
+
+@app.post("/api/cron/daily")
+def daily_cron(db: Session = Depends(get_db)):
+    """Run daily tasks: import new data, re-score conflicts, send digest emails."""
+    import asyncio
+    from .seeds import update_watched_associations
+    
+    # 1. Update watched associations (if new ones added)
+    update_watched_associations(db)
+    
+    # 2. Import recent data (last 1000 records)
+    log = asyncio.run(import_recent_subventions(db, 1000))
+    
+    # 3. Re-score conflicts
+    score_conflicts(db)
+    
+    return {
+        "status": "completed",
+        "imported": log.records_imported,
+        "updated": log.records_updated,
+        "import_status": log.status,
+        "high_risk": db.query(Subvention).filter(Subvention.risk_level == RiskLevel.HIGH).count(),
+        "critical": db.query(Subvention).filter(Subvention.risk_level == RiskLevel.CRITICAL).count()
+    }
 
 # ====================================================================
 # DASHBOARD
