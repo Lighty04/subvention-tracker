@@ -15,7 +15,7 @@ async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE, year: int 
             "order_by": "annee_budgetaire DESC"
         }
         if year:
-            params["where"] = f"annee_budgetaire={year}"
+            params["refine"] = f"annee_budgetaire:{year}"
         resp = await client.get(PARIS_API_URL, params=params, timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
