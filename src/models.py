@@ -87,6 +87,34 @@ class Alert(Base):
     user = relationship("User", back_populates="alerts")
     subvention = relationship("Subvention", back_populates="alerts")
 
+class Person(Base):
+    __tablename__ = "persons"
+    
+    id = Column(Integer, primary_key=True)
+    nom = Column(String(500), index=True)
+    roles = Column(JSON, default=list)  # [{"association": "...", "role": "President", "date_debut": "..."}]
+    is_elected_official = Column(Boolean, default=False)
+    elected_role = Column(String(200), nullable=True)  # e.g. "Deputy Mayor, 12th arr."
+    total_controlled = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class AssociationProfile(Base):
+    __tablename__ = "association_profiles"
+    
+    id = Column(Integer, primary_key=True)
+    nom = Column(String(500), index=True)
+    numero_siret = Column(String(14), unique=True, index=True, nullable=True)
+    rna = Column(String(20), nullable=True)  # RNA number
+    adresse = Column(Text, nullable=True)
+    date_creation = Column(DateTime, nullable=True)
+    objetsocial = Column(Text, nullable=True)
+    total_subventions_received = Column(Integer, default=0)
+    subvention_count = Column(Integer, default=0)
+    board_members = Column(JSON, default=list)  # [{"nom": "...", "role": "...", "is_elected": false}]
+    risk_level = Column(Enum(RiskLevel), default=RiskLevel.LOW)
+    last_enriched = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class ImportLog(Base):
     __tablename__ = "import_logs"
     

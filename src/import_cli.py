@@ -3,6 +3,7 @@ import asyncio
 import sys
 import os
 import argparse
+from datetime import datetime
 
 from .models import SessionLocal, init_db
 from .scraper import import_recent_subventions
@@ -12,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description="Import subventions from Paris Open Data")
     parser.add_argument("--max-records", type=int, default=500, help="Max records to import")
     parser.add_argument("--seed", action="store_true", help="Seed watched associations first")
+    parser.add_argument("--full", action="store_true", help="Import full dataset (all years, high offset)")
     args = parser.parse_args()
     
     init_db()
@@ -22,8 +24,13 @@ def main():
             count = seed_watched_associations(db)
             print(f"Seeded {count} watched associations")
         
-        print(f"Starting import (max {args.max_records} records)...")
-        log = asyncio.run(import_recent_subventions(db, args.max_records))
+        if args.full:
+            print("Starting FULL import (all years, up to 106k records)...")
+            log = asyncio.run(import_recent_subventions(db, 200000))
+        else:
+            print(f"Starting import (max {args.max_records} records)...")
+            log = asyncio.run(import_recent_subventions(db, args.max_records))
+        
         print(f"Import {log.status}: {log.records_imported} imported, {log.records_updated} updated")
         if log.error_message:
             print(f"Error: {log.error_message}")
