@@ -1,0 +1,119 @@
+import httpx
+from sqlalchemy.orm import Session
+from .models import Subvention, ImportLog, RiskLevel, WatchedAssociation
+from typing import Optional, List
+from datetime import datetime
+import asyncio
+
+PARIS_API_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/subventions-associations-votees-/records"
+BATCH_SIZE = 100
+
+async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE) -> List[dict]:
+    async with httpx.AsyncClient() as client:
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "order_by": "annee_budgetaire DESC"
+        }
+        resp = await client.get(PARIS_API_URL, params=params, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("results", [])
+
+async def import_recent_subventions(db: Session, max_records: int = 500) -> ImportLog:
+    log = ImportLog(status="running")
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    
+    imported = 0
+    updated = 0
+    offset = 0
+    
+    try:
+        while imported < max_records:
+            batch = await fetch_subventions(offset=offset, limit=BATCH_SIZE)
+            if not batch:
+                break
+            
+            for record in batch:
+                dossier = record.get("numero_de_dossier")
+                existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
+                
+                subvention_data = {
+                    "numero_dossier": dossier,
+                    "annee_budgetaire": int(record.get("annee_budgetaire", 0)) if record.get("annee_budgetaire") else None,
+                    "collectivite": record.get("collectivite"),
+                    "nom_beneficiaire": record.get("nom_beneficiaire"),
+                    "numero_siret": record.get("numero_siret"),
+                    "objet_dossier": record.get("objet_du_dossier"),
+                    "montant_vote": record.get("montant_vote"),
+                    "direction": record.get("direction"),
+                    "nature_subvention": record.get("nature_de_la_subvention"),
+                    "secteurs_activites": record.get("secteurs_d_activites_definies_par_l_association", [])
+                }
+                
+                if existing:
+                    for key, value in subvention_data.items():
+                        setattr(existing, key, value)
+                    updated += 1
+                else:
+                    db.add(Subvention(**subvention_data))
+                    imported += 1
+            
+            db.commit()
+            offset += len(batch)
+            if len(batch) < BATCH_SIZE:
+                break
+        
+        # Run conflict scoring
+        score_conflicts(db)
+        
+        log.records_imported = imported
+        log.records_updated = updated
+        log.status = "success"
+        
+    except Exception as e:
+        log.status = "failed"
+        log.error_message = str(e)
+    
+    log.finished_at = datetime.utcnow()
+    db.commit()
+    db.refresh(log)
+    return log
+
+def score_conflicts(db: Session) -> None:
+    """Flag subventions where beneficiary matches watched associations."""
+    watched = db.query(WatchedAssociation).filter_by(active=True).all()
+    watched_names = {w.nom.lower() for w in watched}
+    watched_sirets = {w.numero_siret for w in watched if w.numero_siret}
+    
+    subventions = db.query(Subvention).filter(Subvention.risk_level == RiskLevel.LOW).all()
+    
+    for sub in subventions:
+        reasons = []
+        max_risk = RiskLevel.LOW
+        
+        # Match by SIRET (exact)
+        if sub.numero_siret and sub.numero_siret in watched_sirets:
+            reasons.append(f"SIRET {sub.numero_siret} matches watched association")
+            max_risk = RiskLevel.CRITICAL
+        
+        # Match by name (fuzzy/contains)
+        if sub.nom_beneficiaire:
+            name_lower = sub.nom_beneficiaire.lower()
+            for w in watched:
+                if w.nom.lower() in name_lower or name_lower in w.nom.lower():
+                    reasons.append(f"Name matches watched association: {w.nom}")
+                    if w.risk_level == RiskLevel.CRITICAL:
+                        max_risk = RiskLevel.CRITICAL
+                    elif w.risk_level == RiskLevel.HIGH and max_risk != RiskLevel.CRITICAL:
+                        max_risk = RiskLevel.HIGH
+        
+        if reasons:
+            sub.risk_level = max_risk
+            sub.risk_reasons = reasons
+    
+    db.commit()
+
+from datetime import datetime
