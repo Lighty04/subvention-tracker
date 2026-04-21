@@ -28,13 +28,12 @@ async def fetch_subventions(offset: int = 0, limit: int = BATCH_SIZE, year: int 
 async def download_full_csv() -> List[dict]:
     """Download full dataset as CSV (bypasses 10k API limit)."""
     async with httpx.AsyncClient() as client:
-        params = {"limit": -1, "facet": "false"}  # -1 = all records
-        resp = await client.get(PARIS_CSV_URL, params=params, timeout=120.0)
+        resp = await client.get(PARIS_CSV_URL, timeout=300.0)  # No params, default export
         resp.raise_for_status()
         
-        # Parse CSV
-        content = resp.text
-        reader = csv.DictReader(io.StringIO(content))
+        # Parse CSV (semicolon-separated, strip BOM)
+        content = resp.text.lstrip('\ufeff')
+        reader = csv.DictReader(io.StringIO(content), delimiter=';')
         records = []
         for row in reader:
             records.append({
@@ -53,19 +52,21 @@ async def download_full_csv() -> List[dict]:
 
 def _import_record(db: Session, record: dict, imported: list, updated: list):
     """Import a single record. Returns True if imported/updated."""
+    # Strip BOM from keys
+    record = {k.lstrip('\ufeff'): v for k, v in record.items()}
     dossier = record.get("numero_de_dossier")
     if not dossier:
         return False
     
     existing = db.query(Subvention).filter_by(numero_dossier=dossier).first()
     
-    # Parse amount - handle both string and numeric
-    amount = record.get("montant_vote")
-    if isinstance(amount, str):
-        amount = amount.replace(" ", "").replace(",", ".")
+    # Parse amount - CSV amounts are plain integers as strings
+    amount_str = record.get("montant_vote", "")
+    amount = None
+    if amount_str and amount_str.strip():
         try:
-            amount = float(amount)
-        except:
+            amount = int(float(amount_str.strip()))
+        except (ValueError, TypeError):
             amount = None
     
     subvention_data = {
@@ -75,7 +76,7 @@ def _import_record(db: Session, record: dict, imported: list, updated: list):
         "nom_beneficiaire": record.get("nom_beneficiaire"),
         "numero_siret": record.get("numero_siret"),
         "objet_dossier": record.get("objet_du_dossier"),
-        "montant_vote": int(amount) if amount else None,
+        "montant_vote": amount,
         "direction": record.get("direction"),
         "nature_subvention": record.get("nature_de_la_subvention"),
         "secteurs_activites": record.get("secteurs_d_activites_definies_par_l_association", [])
