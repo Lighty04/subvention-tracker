@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SubventionTracker Daily</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin-bottom: 20px; }
+        .stat-card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; }
+        .stat-card.highlight { background: #ffebee; border-left: 4px solid #e53935; }
+        .stat-card h3 { margin: 0; font-size: 24px; color: #333; }
+        .stat-card p { margin: 5px 0 0; color: #666; font-size: 14px; }
+        .section { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .section h2 { margin-top: 0; font-size: 18px; color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #eee; }
+        th { background: #f9f9f9; font-weight: 600; }
+        .risk-critical { color: #c62828; font-weight: bold; }
+        .risk-high { color: #ef6c00; }
+        .risk-medium { color: #f9a825; }
+        .trend-badge { background: #e8f5e9; color: #2e7d32; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+        .nav { display: flex; gap: 10px; margin-bottom: 20px; }
+        .nav a { text-decoration: none; color: #1976d2; padding: 8px 16px; border-radius: 4px; }
+        .nav a:hover { background: #e3f2fd; }
+        .btn { background: #1976d2; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; }
+        .empty-state { text-align: center; padding: 40px; color: #999; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 SubventionTracker Daily</h1>
+        <div class="nav">
+            <a href="/">🏠 Home</a>
+            <a href="/api/subventions/export?format=csv">📥 Export CSV</a>
+            <a href="/api/newsletter/preview">📰 Newsletter</a>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>{{ alert_summary.new_count }}</h3>
+            <p>New Subventions</p>
+        </div>
+        <div class="stat-card highlight">
+            <h3>{{ alert_summary.conflict_count }}</h3>
+            <p>New Conflicts</p>
+        </div>
+        <div class="stat-card">
+            <h3>{{ alert_summary.first_ever }}</h3>
+            <p>First-Ever</p>
+        </div>
+        <div class="stat-card">
+            <h3>{{ alert_summary.high_amount }}</h3>
+            <p>High Amount</p>
+        </div>
+        <div class="stat-card">
+            <h3>{{ alert_summary.trending_count }}</h3>
+            <p>Trending</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🚨 Top Conflicts (Last 24h)</h2>
+        {% if top_conflicts %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Beneficiary</th>
+                    <th>Amount</th>
+                    <th>Year</th>
+                    <th>Risk</th>
+                    <th>Reason</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in top_conflicts %}
+                <tr class="risk-{{ s.risk_level.value }}">
+                    <td>{{ s.nom_beneficiaire }}</td>
+                    <td>€{{ "{:,}".format(s.montant_vote).replace(",", " ") }}</td>
+                    <td>{{ s.annee_budgetaire }}</td>
+                    <td class="risk-{{ s.risk_level.value }}">{{ s.risk_level.value.upper() }}</td>
+                    <td>{{ s.risk_reasons[0] if s.risk_reasons else '' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">No new conflicts in the last 24 hours</div>
+        {% endif %}
+    </div>
+
+    <div class="section">
+        <h2>📈 Trending (Unusually High Amounts)</h2>
+        {% if trending %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Beneficiary</th>
+                    <th>Amount</th>
+                    <th>Historical Avg</th>
+                    <th>Multiplier</th>
+                    <th>Year</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in trending %}
+                <tr>
+                    <td>{{ t.subvention.nom_beneficiaire }}</td>
+                    <td>€{{ "{:,}".format(t.subvention.montant_vote).replace(",", " ") }}</td>
+                    <td>€{{ "{:,}".format(t.average).replace(",", " ") }}</td>
+                    <td><span class="trend-badge">{{ t.multiplier }}x</span></td>
+                    <td>{{ t.subvention.annee_budgetaire }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">No unusual amounts detected recently</div>
+        {% endif %}
+    </div>
+
+    <div class="section">
+        <h2>📋 New Subventions (Last 24h)</h2>
+        {% if new_subventions %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Beneficiary</th>
+                    <th>Amount</th>
+                    <th>Year</th>
+                    <th>Risk</th>
+                    <th>Object</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in new_subventions %}
+                <tr class="risk-{{ s.risk_level.value }}">
+                    <td>{{ s.nom_beneficiaire }}</td>
+                    <td>€{{ "{:,}".format(s.montant_vote).replace(",", " ") }}</td>
+                    <td>{{ s.annee_budgetaire }}</td>
+                    <td class="risk-{{ s.risk_level.value }}">{{ s.risk_level.value.upper() }}</td>
+                    <td>{{ s.objet_dossier[:60] }}...</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">No new subventions in the last 24 hours</div>
+        {% endif %}
+    </div>
+
+    <footer style="text-align:center;padding:20px;color:#999">
+        <p>SubventionTracker — Monitoring public subventions in Paris</p>
+        <p><a href="/api/subventions/export?format=pdf" style="color:#1976d2">Download PDF Report</a> · <a href="/api/subventions/export?format=csv" style="color:#1976d2">Export CSV</a></p>
+    </footer>
+</body>
+</html>
