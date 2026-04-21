@@ -108,6 +108,13 @@ def score_conflicts(db: Session) -> None:
     watched = db.query(WatchedAssociation).filter_by(active=True).all()
     watched_sirets = {w.numero_siret for w in watched if w.numero_siret}
     
+    # Precompute watched name tokens for faster matching
+    watched_tokens = []
+    for w in watched:
+        norm = normalize_text(w.nom)
+        tokens = set(t for t in norm.split() if len(t) >= 3)
+        watched_tokens.append((w, tokens))
+    
     subventions = db.query(Subvention).filter(Subvention.risk_level == RiskLevel.LOW).all()
     
     for sub in subventions:
@@ -119,10 +126,12 @@ def score_conflicts(db: Session) -> None:
             max_risk = RiskLevel.CRITICAL
         
         if sub.nom_beneficiaire:
-            name_lower = normalize_text(sub.nom_beneficiaire)
-            for w in watched:
-                w_norm = normalize_text(w.nom)
-                if w_norm in name_lower or name_lower in w_norm:
+            sub_norm = normalize_text(sub.nom_beneficiaire)
+            sub_tokens = set(t for t in sub_norm.split() if len(t) >= 3)
+            
+            for w, w_tokens in watched_tokens:
+                # Match if they share at least one significant token
+                if sub_tokens & w_tokens:
                     reasons.append(f"Name matches watched association: {w.nom}")
                     if w.risk_level == RiskLevel.CRITICAL:
                         max_risk = RiskLevel.CRITICAL
