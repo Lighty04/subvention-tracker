@@ -108,12 +108,14 @@ def score_conflicts(db: Session) -> None:
     watched = db.query(WatchedAssociation).filter_by(active=True).all()
     watched_sirets = {w.numero_siret for w in watched if w.numero_siret}
     
-    # Precompute watched name tokens for faster matching
-    watched_tokens = []
+    # Precompute watched names with stopword filtering
+    stopwords = {"association", "fondation", "pour", "les", "des", "de", "la", "le", "du", "et", "en", "paris", "france", "la", "du", "et"}
+    
+    watched_names = []
     for w in watched:
         norm = normalize_text(w.nom)
-        tokens = set(t for t in norm.split() if len(t) >= 3)
-        watched_tokens.append((w, tokens))
+        tokens = set(t for t in norm.split() if len(t) >= 3 and t not in stopwords)
+        watched_names.append((w, tokens))
     
     subventions = db.query(Subvention).filter(Subvention.risk_level == RiskLevel.LOW).all()
     
@@ -127,11 +129,12 @@ def score_conflicts(db: Session) -> None:
         
         if sub.nom_beneficiaire:
             sub_norm = normalize_text(sub.nom_beneficiaire)
-            sub_tokens = set(t for t in sub_norm.split() if len(t) >= 3)
+            sub_tokens = set(t for t in sub_norm.split() if len(t) >= 3 and t not in stopwords)
             
-            for w, w_tokens in watched_tokens:
-                # Match if they share at least one significant token
-                if sub_tokens & w_tokens:
+            for w, w_tokens in watched_names:
+                # Match if they share at least 2 significant tokens (avoids single-word false positives)
+                matching = sub_tokens & w_tokens
+                if len(matching) >= 2 or (len(w_tokens) == 1 and len(matching) == 1):
                     reasons.append(f"Name matches watched association: {w.nom}")
                     if w.risk_level == RiskLevel.CRITICAL:
                         max_risk = RiskLevel.CRITICAL
