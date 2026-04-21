@@ -203,18 +203,30 @@ def score_conflicts(db: Session) -> None:
             sub_tokens = [t for t in sub_norm.split() if len(t) >= 3 and t not in stopwords]
             
             for w, w_norm, w_tokens in watched_entries:
-                # 1. Exact substring match
+                # Strict matching: only match if the FULL watched name (or a close variant) appears
+                # in the association name. NOT individual tokens.
                 matched = False
+                
+                # 1. Full name substring (both directions)
                 if w_norm in sub_norm or sub_norm in w_norm:
                     matched = True
-                # 2. Key token overlap (first 1-2 identifying words match)
-                elif w_tokens and sub_tokens:
-                    # Match if first token matches
-                    if w_tokens[0] in sub_tokens:
+                # 2. For multi-word watched names: check if ALL key tokens appear in order
+                elif len(w_tokens) >= 2 and sub_tokens:
+                    # All tokens must be present AND in relative order
+                    idx = 0
+                    found_count = 0
+                    for token in w_tokens:
+                        try:
+                            new_idx = sub_tokens.index(token, idx)
+                            idx = new_idx + 1
+                            found_count += 1
+                        except ValueError:
+                            pass
+                    if found_count >= len(w_tokens):
                         matched = True
-                    # Or if 2+ tokens overlap (for multi-word orgs)
-                    overlap = set(w_tokens) & set(sub_tokens)
-                    if len(overlap) >= 2:
+                # 3. Single distinctive token (only if it's a unique/identifying word, min 5 chars)
+                elif len(w_tokens) == 1 and len(w_tokens[0]) >= 5 and sub_tokens:
+                    if w_tokens[0] in sub_tokens:
                         matched = True
                 
                 if matched:
